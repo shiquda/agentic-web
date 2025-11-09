@@ -313,7 +313,7 @@ If you don't need to use any tools to answer the question, respond directly with
 
     def _format_tools_for_prompt(self) -> str:
         """
-        格式化工具描述用于提示词
+        格式化工具描述用于提示词（包含详细的参数 schema）
 
         Returns:
             工具描述文本
@@ -330,12 +330,52 @@ If you don't need to use any tools to answer the question, respond directly with
             # 添加工具名称和描述
             lines.append(f"- {tool_key}: {tool.description}")
 
-            # 添加输入schema信息（简化）
+            # 添加详细的输入 schema 信息
             if hasattr(tool, "inputSchema") and tool.inputSchema:
                 schema = tool.inputSchema
                 if "properties" in schema:
-                    args = ", ".join(schema["properties"].keys())
-                    lines.append(f"  Arguments: {args}")
+                    lines.append("  Parameters:")
+                    required = schema.get("required", [])
+
+                    for param_name, param_schema in schema["properties"].items():
+                        # 构建参数描述
+                        param_type = param_schema.get("type", "any")
+                        is_required = "required" if param_name in required else "optional"
+
+                        # 基本参数信息
+                        param_desc = f"    - {param_name} ({is_required}, {param_type})"
+
+                        # 添加参数描述
+                        if "description" in param_schema:
+                            param_desc += f": {param_schema['description']}"
+
+                        lines.append(param_desc)
+
+                        # 添加枚举值约束（重要！）
+                        if "enum" in param_schema:
+                            enum_values = param_schema["enum"]
+                            # 如果枚举值太多，只显示前几个
+                            if len(enum_values) > 10:
+                                displayed = ", ".join(enum_values[:10])
+                                lines.append(f"      Valid values: {displayed}, ... ({len(enum_values)} total)")
+                            else:
+                                displayed = ", ".join(enum_values)
+                                lines.append(f"      Valid values: {displayed}")
+
+                        # 添加默认值
+                        if "default" in param_schema:
+                            lines.append(f"      Default: {param_schema['default']}")
+
+                        # 添加数值范围约束
+                        if "minimum" in param_schema or "maximum" in param_schema:
+                            min_val = param_schema.get("minimum", "")
+                            max_val = param_schema.get("maximum", "")
+                            if min_val and max_val:
+                                lines.append(f"      Range: {min_val} to {max_val}")
+                            elif min_val:
+                                lines.append(f"      Minimum: {min_val}")
+                            elif max_val:
+                                lines.append(f"      Maximum: {max_val}")
 
         return "\n".join(lines)
 

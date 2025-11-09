@@ -64,10 +64,11 @@ class MCPAgentExecutor(BaseAgentExecutor):
             user_message = await self.prepare_input(context)
 
             if not user_message:
-                # 发送最终错误消息（使用 Message 事件）
-                await event_queue.enqueue_event(
-                    new_agent_text_message("No message content found")
+                # 发送错误消息（使用 TaskUpdater 标记任务失败，符合 A2A 协议）
+                error_message = updater.new_agent_message(
+                    parts=[Part(root=TextPart(text="No message content found"))]
                 )
+                await updater.failed(error_message)
                 return
 
             logger.info(f"MCP Agent '{self.agent.name}' processing: {user_message[:100]}...")
@@ -95,12 +96,23 @@ class MCPAgentExecutor(BaseAgentExecutor):
                 logger.info(f"MCP Agent '{self.agent.name}' using PROMPT tool calling mode")
                 result = await self._execute_prompt_mode(user_message, updater)
 
-            # 发送最终答案
-            logger.info(f"Sending final answer as Message event...")
-            await event_queue.enqueue_event(
-                new_agent_text_message(result)
+            # 发送最终答案（使用 add_artifact + complete，符合 A2A 最佳实践）
+            logger.info(f"Sending final result as artifact...")
+
+            # 1. 添加最终结果作为 artifact（实际内容）
+            await updater.add_artifact(
+                parts=[Part(root=TextPart(text=result))],
+                name="mcp_agent_result",
+                last_chunk=True
             )
-            logger.info(f"Final answer sent successfully")
+            logger.info(f"Final result added as artifact")
+
+            # 2. 标记任务完成（描述性消息）
+            completion_message = updater.new_agent_message(
+                parts=[Part(root=TextPart(text="✅ Task completed successfully!"))]
+            )
+            await updater.complete(completion_message)
+            logger.info(f"Task marked as completed")
             return
 
         except Exception as e:
@@ -108,12 +120,11 @@ class MCPAgentExecutor(BaseAgentExecutor):
                 f"Error in MCP Agent '{self.agent.name}' execution: {e}\n"
                 f"Traceback: {traceback.format_exc()}"
             )
-            # 发送错误消息给客户端
-            await event_queue.enqueue_event(
-                new_agent_text_message(
-                    f"Sorry, an error occurred while processing your request: {str(e)}"
-                )
+            # 发送错误消息给客户端（使用 TaskUpdater 标记任务失败，符合 A2A 协议）
+            error_message = updater.new_agent_message(
+                parts=[Part(root=TextPart(text=f"Sorry, an error occurred while processing your request: {str(e)}"))]
             )
+            await updater.failed(error_message)
             raise
 
     async def _execute_native_mode(self, user_message: str, updater: TaskUpdater) -> str:

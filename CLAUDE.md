@@ -227,17 +227,6 @@ agents:
 - 文档查询: 使用Context7工具查询A2A协议细节
 - GitHub查询: 使用DeepWiki工具与a2a相关仓库对话
 
-## 待实现功能
-
-基于README中提到的改进方向（README.md:343-350）:
-
-1. **Anthropic Provider**: 在 `core/llm_manager.py:168-170` 添加实现
-2. **Local Model Provider**: 在 `core/llm_manager.py:172-174` 添加实现
-3. **流式响应完善**: StreamingLLMAgent的executor集成
-4. **Agent协作**: 实现Coordinator模式
-5. **持久化存储**: 替换InMemoryTaskStore
-6. **Docker支持**: 添加Dockerfile
-
 ## 配置示例参考
 
 完整配置示例见 `config/agents.example.yaml`，包含：

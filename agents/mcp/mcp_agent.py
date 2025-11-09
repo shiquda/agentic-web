@@ -203,7 +203,31 @@ class MCPAgent(BaseAgent):
         Returns:
             消息列表
         """
-        system_prompt = self.mcp_config.system_prompt or self._build_default_system_prompt()
+        # 构建系统提示词
+        if self.mcp_config.system_prompt:
+            # 用户提供了自定义提示词，追加工具信息
+            tools_description = self._format_tools_for_prompt()
+            system_prompt = f"""{self.mcp_config.system_prompt}
+
+## Available Tools
+
+You have access to the following external tools:
+{tools_description}
+
+To use a tool, respond with a JSON block in this format:
+```json
+{{
+  "tool": "server:tool_name",
+  "arguments": {{"arg1": "value1", "arg2": "value2"}}
+}}
+```
+
+You can call multiple tools in sequence if needed. After receiving tool results, use them to formulate your final answer.
+If you don't need to use any tools to answer the question, respond directly without any JSON blocks.
+"""
+        else:
+            # 使用默认系统提示词
+            system_prompt = self._build_default_system_prompt()
 
         return [
             {"role": "system", "content": system_prompt},

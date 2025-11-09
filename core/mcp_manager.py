@@ -48,6 +48,29 @@ class MCPClientManager:
         self._read_stream = None
         self._write_stream = None
         self._stdio_context = None
+        self._http_session = None  # 用于HTTP传输，保持HTTP会话引用
+
+    @staticmethod
+    def _disable_proxy():
+        """临时禁用代理环境变量并返回原值"""
+        import os
+        old_values = {
+            'HTTP_PROXY': os.environ.get('HTTP_PROXY'),
+            'HTTPS_PROXY': os.environ.get('HTTPS_PROXY'),
+            'http_proxy': os.environ.get('http_proxy'),
+            'https_proxy': os.environ.get('https_proxy'),
+        }
+        for key in old_values.keys():
+            os.environ.pop(key, None)
+        return old_values
+
+    @staticmethod
+    def _restore_proxy(old_values: dict):
+        """恢复代理环境变量"""
+        import os
+        for key, value in old_values.items():
+            if value is not None:
+                os.environ[key] = value
 
     async def initialize(self):
         """初始化连接到MCP服务器"""
@@ -59,7 +82,7 @@ class MCPClientManager:
 
         if self.config.transport == MCPTransport.STDIO:
             await self._initialize_stdio()
-        elif self.config.transport in (MCPTransport.SSE, MCPTransport.STREAMABLE_HTTP):
+        elif self.config.transport in (MCPTransport.SSE, MCPTransport.HTTP, MCPTransport.STREAMABLE_HTTP):
             await self._initialize_streamable_http()
         else:
             raise ValueError(f"Unknown transport type: {self.config.transport}")
@@ -106,24 +129,72 @@ class MCPClientManager:
 
         logger.info(
             f"MCP client '{self.name}' connecting via {self.config.transport} "
-            f"(url: {self.config.url})"
+            f"(url: {self.config.url}, verify_ssl={self.config.verify_ssl}, use_proxy={self.config.use_proxy})"
         )
 
-        # 建立连接
-        self._stdio_context = streamablehttp_client(self.config.url)
-        read_stream, write_stream, _ = await self._stdio_context.__aenter__()
+        # 临时禁用代理（如果配置中禁用）
+        old_proxy = None
+        if not self.config.use_proxy:
+            old_proxy = self._disable_proxy()
+            logger.debug(f"MCP client '{self.name}' connecting without proxy")
 
-        self._read_stream = read_stream
-        self._write_stream = write_stream
+        try:
+            import httpx
 
-        # 创建会话
-        self._session = ClientSession(read_stream, write_stream)
+            # 创建自定义httpx客户端工厂函数
+            def client_factory(**kwargs):
+                """
+                工厂函数，接收MCP SDK传递的参数
 
-        # 初始化会话
-        await self._session.__aenter__()
-        await self._session.initialize()
+                Args:
+                    **kwargs: MCP SDK传递的参数（headers, timeout, auth等）
+                """
+                if not self.config.verify_ssl:
+                    # 禁用SSL验证
+                    kwargs['verify'] = False
+                    logger.warning(
+                        f"MCP client '{self.name}' SSL verification disabled - "
+                        "this is insecure and should only be used for development/testing"
+                    )
 
-        logger.debug(f"MCP client '{self.name}' streamable HTTP connection established")
+                return httpx.AsyncClient(**kwargs)
+
+            # 建立连接
+            self._stdio_context = streamablehttp_client(
+                self.config.url,
+                httpx_client_factory=client_factory
+            )
+            read_stream, write_stream, http_session = await self._stdio_context.__aenter__()
+
+            self._read_stream = read_stream
+            self._write_stream = write_stream
+            self._http_session = http_session  # 保持HTTP会话引用，防止被GC
+
+            # 创建会话
+            self._session = ClientSession(read_stream, write_stream)
+
+            # 初始化会话
+            await self._session.__aenter__()
+            await self._session.initialize()
+
+            logger.debug(f"MCP client '{self.name}' streamable HTTP connection established")
+        finally:
+            # 恢复代理设置（如果之前禁用了）
+            if old_proxy is not None:
+                self._restore_proxy(old_proxy)
+
+    def get_cached_tools(self) -> list[Tool]:
+        """
+        获取缓存的工具列表（无需重新查询）
+
+        Returns:
+            缓存的工具列表
+        """
+        logger.debug(
+            f"MCP client '{self.name}' returning cached tools: "
+            f"{len(self._tools)} tools cached"
+        )
+        return self._tools
 
     async def list_tools(self) -> list[Tool]:
         """
@@ -136,18 +207,38 @@ class MCPClientManager:
             RuntimeError: 客户端未连接
         """
         if not self._session:
-            raise RuntimeError(f"MCP client '{self.name}' not connected")
+            raise RuntimeError(f"MCP client '{self.name}' not connected (session is None)")
+
+        # 检查 session 是否已关闭
+        if hasattr(self._session, '_closed') and self._session._closed:
+            raise RuntimeError(f"MCP client '{self.name}' session is closed")
 
         logger.debug(f"MCP client '{self.name}' listing tools...")
-        result = await self._session.list_tools()
-        self._tools = result.tools
 
-        logger.info(
-            f"MCP client '{self.name}' found {len(self._tools)} tools: "
-            f"{[t.name for t in self._tools]}"
-        )
+        # 临时禁用代理（如果配置要求）
+        old_proxy = None
+        if not self.config.use_proxy:
+            old_proxy = self._disable_proxy()
 
-        return self._tools
+        try:
+            result = await self._session.list_tools()
+            self._tools = result.tools
+
+            logger.info(
+                f"MCP client '{self.name}' found {len(self._tools)} tools: "
+                f"{[t.name for t in self._tools]}"
+            )
+
+            return self._tools
+        except Exception as e:
+            logger.error(
+                f"MCP client '{self.name}' failed to list tools: {type(e).__name__}: {e}",
+                exc_info=True
+            )
+            raise
+        finally:
+            if old_proxy is not None:
+                self._restore_proxy(old_proxy)
 
     async def call_tool(self, tool_name: str, arguments: dict[str, Any]) -> CallToolResult:
         """
@@ -171,11 +262,18 @@ class MCPClientManager:
             f"with args: {arguments}"
         )
 
-        result = await self._session.call_tool(tool_name, arguments)
+        # 临时禁用代理（如果配置要求）
+        old_proxy = None
+        if not self.config.use_proxy:
+            old_proxy = self._disable_proxy()
 
-        logger.debug(f"MCP client '{self.name}' tool '{tool_name}' call completed")
-
-        return result
+        try:
+            result = await self._session.call_tool(tool_name, arguments)
+            logger.debug(f"MCP client '{self.name}' tool '{tool_name}' call completed")
+            return result
+        finally:
+            if old_proxy is not None:
+                self._restore_proxy(old_proxy)
 
     async def cleanup(self):
         """清理资源"""
@@ -248,7 +346,10 @@ class MCPManagerPool:
         failed = []
         for name, result in zip(self._clients.keys(), results):
             if isinstance(result, Exception):
-                logger.error(f"Failed to initialize MCP server '{name}': {result}")
+                logger.error(
+                    f"Failed to initialize MCP server '{name}': {result}",
+                    exc_info=result  # 显示完整堆栈
+                )
                 failed.append(name)
 
         if failed:
@@ -277,6 +378,35 @@ class MCPManagerPool:
             raise KeyError(f"MCP server '{name}' not found in pool")
         return self._clients[name]
 
+    def get_all_cached_tools(self, server_names: list[str]) -> dict[str, list[Tool]]:
+        """
+        获取指定服务器的缓存工具（无需重新查询）
+
+        Args:
+            server_names: 服务器名称列表
+
+        Returns:
+            服务器名 -> 工具列表的映射
+        """
+        tools_by_server = {}
+
+        logger.debug(f"Attempting to get cached tools for servers: {server_names}")
+
+        for name in server_names:
+            try:
+                client = self.get_client(name)
+                tools = client.get_cached_tools()
+                tools_by_server[name] = tools
+                logger.debug(f"Got {len(tools)} cached tools from server '{name}'")
+            except Exception as e:
+                logger.warning(
+                    f"Failed to get cached tools from MCP server '{name}': {e}",
+                    exc_info=True
+                )
+                tools_by_server[name] = []
+
+        return tools_by_server
+
     async def get_all_tools(self, server_names: list[str]) -> dict[str, list[Tool]]:
         """
         获取指定服务器的所有工具
@@ -295,7 +425,10 @@ class MCPManagerPool:
                 tools = await client.list_tools()
                 tools_by_server[name] = tools
             except Exception as e:
-                logger.error(f"Failed to get tools from MCP server '{name}': {e}")
+                logger.error(
+                    f"Failed to get tools from MCP server '{name}': {type(e).__name__}: {e}",
+                    exc_info=True
+                )
                 tools_by_server[name] = []
 
         return tools_by_server

@@ -81,6 +81,7 @@ class MCPAgent(BaseAgent):
     async def initialize(self):
         """初始化Agent，加载MCP工具"""
         logger.info(f"MCP Agent '{self.name}' initializing...")
+        logger.debug(f"MCP pool instance ID at init: {id(self.mcp_pool)}")
 
         if not self.mcp_config.servers:
             logger.warning(f"MCP Agent '{self.name}' has no configured servers")
@@ -90,6 +91,8 @@ class MCPAgent(BaseAgent):
         tools_by_server = await self.mcp_pool.get_all_tools(
             self.mcp_config.servers
         )
+
+        logger.debug(f"tools_by_server after loading: {[(k, len(v)) for k, v in tools_by_server.items()]}")
 
         # 构建工具索引（工具名 -> 服务器名）
         tool_count = 0
@@ -109,6 +112,7 @@ class MCPAgent(BaseAgent):
         )
 
         # 打印工具列表（调试）
+        logger.info(f"Available tools: {list(self._tools_cache.keys())}")
         if logger.isEnabledFor(logging.DEBUG):
             for tool_key, tool_info in self._tools_cache.items():
                 tool = tool_info["tool"]
@@ -130,6 +134,9 @@ class MCPAgent(BaseAgent):
         Returns:
             Agent的响应文本
         """
+        # 确保工具已加载（懒加载）
+        await self._ensure_tools_loaded()
+
         # 提取用户消息
         if isinstance(input_data, str):
             user_message = input_data
@@ -229,6 +236,9 @@ If you don't need to use any tools to answer the question, respond directly with
             # 使用默认系统提示词
             system_prompt = self._build_default_system_prompt()
 
+        # 调试日志：打印系统提示词
+        logger.debug(f"System prompt:\n{system_prompt}")
+
         return [
             {"role": "system", "content": system_prompt},
             {"role": "user", "content": user_message},
@@ -261,6 +271,46 @@ You can call multiple tools in sequence if needed. After receiving tool results,
 If you don't need to use any tools to answer the question, respond directly without any JSON blocks.
 """
 
+    async def _ensure_tools_loaded(self) -> None:
+        """
+        确保工具已加载（懒加载模式）
+
+        如果工具缓存为空，尝试从 MCP pool 的缓存中恢复
+        """
+        if not self._tools_cache and self.mcp_config.servers:
+            logger.warning(
+                f"MCP Agent '{self.name}' tools cache is empty, attempting to restore from MCP pool cache..."
+            )
+            logger.debug(f"MCP pool instance ID: {id(self.mcp_pool)}")
+            logger.debug(f"MCP config servers: {self.mcp_config.servers}")
+
+            # 尝试从 MCP pool 缓存中获取工具（无需重新连接）
+            tools_by_server = self.mcp_pool.get_all_cached_tools(
+                self.mcp_config.servers
+            )
+
+            logger.debug(f"Retrieved tools_by_server: {[(k, len(v)) for k, v in tools_by_server.items()]}")
+
+            # 重建工具索引
+            tool_count = 0
+            for server_name, tools in tools_by_server.items():
+                for tool in tools:
+                    tool_key = f"{server_name}:{tool.name}"
+                    self._tools_cache[tool_key] = {
+                        "server": server_name,
+                        "tool": tool,
+                    }
+                    tool_count += 1
+
+            if tool_count > 0:
+                logger.info(
+                    f"MCP Agent '{self.name}' restored {tool_count} tools from cache"
+                )
+            else:
+                logger.error(
+                    f"MCP Agent '{self.name}' failed to restore tools from cache"
+                )
+
     def _format_tools_for_prompt(self) -> str:
         """
         格式化工具描述用于提示词
@@ -269,6 +319,9 @@ If you don't need to use any tools to answer the question, respond directly with
             工具描述文本
         """
         if not self._tools_cache:
+            logger.warning(
+                f"MCP Agent '{self.name}' has no tools in cache when formatting prompt"
+            )
             return "(No tools available)"
 
         lines = []

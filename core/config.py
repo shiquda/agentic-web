@@ -62,6 +62,7 @@ class MCPTransport(str, Enum):
     """MCP传输协议类型"""
     STDIO = "stdio"
     SSE = "sse"
+    HTTP = "http"  # HTTP/Streamable HTTP (Claude Code 兼容)
     STREAMABLE_HTTP = "streamable_http"
 
 
@@ -74,6 +75,8 @@ class MCPServerConfigModel(BaseModel):
     cwd: str | None = Field(default=None)  # 工作目录
     url: str | None = Field(default=None)  # SSE/HTTP传输时必需
     description: str | None = Field(default=None)
+    verify_ssl: bool = Field(default=True)  # SSL证书验证，默认启用
+    use_proxy: bool = Field(default=False)  # 是否使用系统代理，默认禁用
 
     @field_validator("env", mode="before")
     @classmethod
@@ -95,7 +98,7 @@ class MCPServerConfigModel(BaseModel):
         if self.transport == MCPTransport.STDIO:
             if not self.command:
                 raise ValueError("stdio transport requires 'command' field")
-        elif self.transport in (MCPTransport.SSE, MCPTransport.STREAMABLE_HTTP):
+        elif self.transport in (MCPTransport.SSE, MCPTransport.HTTP, MCPTransport.STREAMABLE_HTTP):
             if not self.url:
                 raise ValueError(f"{self.transport} transport requires 'url' field")
 

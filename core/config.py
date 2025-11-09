@@ -31,11 +31,17 @@ class ToolCallingMode(str, Enum):
 
 
 class ToolCallingConfig(BaseModel):
-    """工具调用配置"""
+    """
+    工具调用配置
+
+    注意：此配置只控制调用方式（native vs prompt），不定义具体工具。
+    工具定义应该由Agent动态决定：
+    - MCP Agent: 工具来自MCP服务器
+    - Tool Calling Agent: 工具来自本地注册的函数
+    """
     enabled: bool = Field(default=False, description="是否启用工具调用")
     mode: ToolCallingMode = Field(default=ToolCallingMode.NATIVE, description="工具调用模式")
     tool_choice: str | dict = Field(default="auto", description="工具选择策略: auto/required/none 或具体配置")
-    tools: list[dict[str, Any]] = Field(default_factory=list, description="工具定义列表（JSON Schema格式）")
     max_iterations: int = Field(default=10, gt=0, le=50, description="最大工具调用迭代次数")
 
     class Config:

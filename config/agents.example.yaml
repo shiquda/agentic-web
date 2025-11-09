@@ -85,11 +85,16 @@ llm_providers:
   # ===================================
   # 工具调用 (Tool Calling) 配置示例
   # ===================================
-  # 支持原生OpenAI Tool Calling API
-  # 可以在模型配置中启用工具调用功能
+  # tool_calling 配置控制LLM的工具调用方式，而不是定义具体工具
+  # - mode: native  -> 使用OpenAI原生Tool Calling API（推荐）
+  # - mode: prompt  -> 使用提示词让模型输出JSON格式（默认）
+  #
+  # 工具来源由Agent类型决定：
+  # - MCP Agent: 工具来自MCP服务器（deepwiki、tavily等）
+  # - Tool Calling Agent: 工具来自本地注册的Python函数
 
-  # GPT-4 with Tool Calling - 带工具调用的GPT-4
-  openai-gpt4-tools:
+  # GPT-4 with Native Tool Calling - 原生工具调用模式
+  openai-gpt4-native:
     provider: openai
     model: "gpt-4"
     api_key: "${OPENAI_API_KEY}"
@@ -99,45 +104,12 @@ llm_providers:
     timeout: 60.0
     max_retries: 3
 
-    # 工具调用配置
+    # 工具调用配置（只控制调用方式）
     tool_calling:
       enabled: true           # 启用工具调用
       mode: native            # native（OpenAI原生API）或 prompt（提示词解析）
-      tool_choice: auto       # auto/required/none 或具体配置
+      tool_choice: auto       # auto/required/none
       max_iterations: 10      # 最大工具调用迭代次数
-
-      # 工具定义（JSON Schema格式）
-      # 注意：工具函数需要在代码中注册到ToolExecutor
-      tools:
-        - type: function
-          function:
-            name: get_weather
-            description: Get current weather for a given location
-            parameters:
-              type: object
-              properties:
-                location:
-                  type: string
-                  description: City and country, e.g. Paris, France
-                unit:
-                  type: string
-                  enum: [celsius, fahrenheit]
-                  description: Temperature unit
-              required: [location]
-            strict: true  # 启用严格模式确保参数格式正确
-
-        - type: function
-          function:
-            name: get_current_time
-            description: Get the current time in a specific timezone
-            parameters:
-              type: object
-              properties:
-                timezone:
-                  type: string
-                  description: Timezone name, e.g. America/New_York, Asia/Tokyo
-              required: [timezone]
-            strict: true
 
 # ===================================
 # 全局MCP服务器配置
@@ -315,13 +287,13 @@ agents:
   # Tool-Calling Agent 示例
   # ===================================
   # Weather Assistant - 带工具调用能力的天气助手（已注释）
-  # 可以调用get_weather等工具获取实时信息
+  # 可以调用get_weather等本地Python工具获取信息
   # - name: weather-assistant
   #   description: "AI assistant with tool-calling capabilities for weather and time queries"
   #   type: tool_calling         # Agent类型：tool_calling
   #   host: 0.0.0.0
   #   port: 9011
-  #   llm_provider: openai-gpt4-tools  # 引用配置了工具调用的LLM provider
+  #   llm_provider: openai-gpt4-native  # 使用原生工具调用的LLM provider
   #   provider:
   #     organization: "Weather Services"
   #     url: "https://weather.example.com"
@@ -331,6 +303,29 @@ agents:
   #       When users ask about weather or time, use the available tools to get accurate information.
   #       Always specify the location and unit when calling get_weather.
   #       Provide clear and friendly responses based on the tool results.
+
+  # ===================================
+  # MCP Agent with Native Tool Calling 示例
+  # ===================================
+  # GitHub Explorer with Native Mode - 使用原生工具调用的GitHub探索助手（已注释）
+  # 演示MCP Agent可以使用native模式，获得更好的工具调用性能
+  # - name: github-explorer-native
+  #   description: "GitHub exploration assistant using native tool calling"
+  #   type: mcp
+  #   host: 0.0.0.0
+  #   port: 9012
+  #   llm_provider: openai-gpt4-native  # 使用配置了native模式的provider
+  #   provider:
+  #     organization: "Research Tools"
+  #   extra:
+  #     mcp_config:
+  #       servers:
+  #         - deepwiki              # 使用DeepWiki工具
+  #       max_tool_calls: 8
+  #       tool_choice: auto
+  #       system_prompt: |
+  #         You are a GitHub exploration assistant.
+  #         Use the DeepWiki tools to help users find and understand repositories.
 
   # GPT-3.5 Quick Assistant - 使用GPT-3.5的快速助手（已注释）
   # 取消注释以启用此Agent

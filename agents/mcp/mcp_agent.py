@@ -10,6 +10,7 @@ import re
 from typing import Any
 
 from agents.base import BaseAgent
+from agents.mcp.mcp_agent_tools import convert_mcp_tools_to_openai, execute_mcp_tool_native
 from core.llm_manager import LLMManager
 from core.mcp_manager import MCPManagerPool
 from core.config import MCPAgentConfigModel
@@ -122,11 +123,9 @@ class MCPAgent(BaseAgent):
         """
         执行Agent逻辑
 
-        实现ReAct循环：
-        1. 思考（LLM分析）
-        2. 行动（调用工具）
-        3. 观察（获取工具结果）
-        4. 重复直到得出最终答案
+        根据LLM配置的tool_calling_mode自动选择：
+        - native模式：使用OpenAI原生tool calling
+        - prompt模式：使用提示词+JSON解析（默认）
 
         Args:
             input_data: 用户输入（字符串或包含content的字典）
@@ -147,14 +146,135 @@ class MCPAgent(BaseAgent):
 
         logger.info(f"MCP Agent '{self.name}' processing: {user_message[:100]}...")
 
+        # 检查是否使用原生tool calling
+        # 调试日志：打印实际配置值
+        logger.info(
+            f"MCP Agent '{self.name}' config check: "
+            f"tool_calling_enabled={self.llm_manager.config.tool_calling_enabled} (type={type(self.llm_manager.config.tool_calling_enabled).__name__}), "
+            f"tool_calling_mode={self.llm_manager.config.tool_calling_mode!r} (type={type(self.llm_manager.config.tool_calling_mode).__name__})"
+        )
+
+        use_native_mode = (
+            self.llm_manager.config.tool_calling_enabled
+            and self.llm_manager.config.tool_calling_mode == "native"
+        )
+
+        logger.info(f"MCP Agent '{self.name}' use_native_mode={use_native_mode}")
+
+        if use_native_mode:
+            logger.info(f"MCP Agent '{self.name}' using NATIVE tool calling mode")
+            return await self._invoke_native_mode(user_message)
+        else:
+            logger.info(f"MCP Agent '{self.name}' using PROMPT tool calling mode")
+            return await self._invoke_prompt_mode(user_message)
+
+    async def _invoke_native_mode(self, user_message: str) -> str:
+        """
+        使用OpenAI原生tool calling的invoke实现
+
+        Args:
+            user_message: 用户消息
+
+        Returns:
+            Agent响应
+        """
+        # 准备系统提示词（简化版，不需要工具描述）
+        system_prompt = self.mcp_config.system_prompt or "You are a helpful AI assistant with access to tools."
+
+        # 准备消息
+        messages = [
+            {"role": "system", "content": system_prompt},
+            {"role": "user", "content": user_message},
+        ]
+
+        # 将MCP工具转换为OpenAI格式
+        openai_tools = convert_mcp_tools_to_openai(self._tools_cache)
+
+        # ReAct循环
+        for iteration in range(1, self.mcp_config.max_tool_calls + 2):
+            logger.info(f"MCP Agent '{self.name}' starting iteration {iteration}/{self.mcp_config.max_tool_calls + 1}")
+
+            # 调用LLM（传入tools）
+            response = await self.llm_manager.chat(messages, tools=openai_tools)
+
+            logger.debug(
+                f"LLM response (iteration {iteration}): "
+                f"content={response.content[:100] if response.content else 'None'}..., "
+                f"tool_calls={len(response.tool_calls) if response.tool_calls else 0}"
+            )
+
+            # 如果没有工具调用，返回响应
+            if not response.tool_calls:
+                logger.info(
+                    f"MCP Agent '{self.name}' got final answer (iteration {iteration}, length: {len(response.content or '')} chars)"
+                )
+                return response.content or "No response content"
+
+            # 有工具调用，添加助手消息到历史
+            messages.append({
+                "role": "assistant",
+                "content": response.content,
+                "tool_calls": [
+                    {
+                        "id": tc.id,
+                        "type": "function",
+                        "function": {
+                            "name": tc.function.name,
+                            "arguments": tc.function.arguments
+                        }
+                    }
+                    for tc in response.tool_calls
+                ]
+            })
+
+            logger.info(f"Executing {len(response.tool_calls)} tool call(s)...")
+
+            # 执行所有工具调用
+            for tool_call in response.tool_calls:
+                # 解析工具名（OpenAI格式：server:tool_name）
+                tool_key = tool_call.function.name
+                arguments = json.loads(tool_call.function.arguments)
+
+                logger.info(f"Executing tool call: tool='{tool_key}', arguments={arguments}")
+
+                # 执行MCP工具
+                result = await execute_mcp_tool_native(
+                    tool_key, arguments, self._tools_cache, self.mcp_pool
+                )
+
+                # 将结果添加到消息历史
+                messages.append({
+                    "role": "tool",
+                    "tool_call_id": tool_call.id,
+                    "content": result
+                })
+
+                logger.debug(f"Tool '{tool_key}' executed, result length: {len(result)} chars")
+
+        # 达到最大迭代次数
+        logger.warning(
+            f"MCP Agent '{self.name}' reached max iterations ({self.mcp_config.max_tool_calls})"
+        )
+        return "Sorry, I couldn't complete the task within the allowed tool calls."
+
+    async def _invoke_prompt_mode(self, user_message: str) -> str:
+        """
+        使用提示词+JSON解析的invoke实现（原有实现）
+
+        Args:
+            user_message: 用户消息
+
+        Returns:
+            Agent响应
+        """
         # 准备对话历史
         messages = self._build_initial_messages(user_message)
 
         # ReAct循环
         for iteration in range(self.mcp_config.max_tool_calls + 1):
-            logger.debug(f"MCP Agent '{self.name}' iteration {iteration + 1}")
+            logger.info(f"MCP Agent '{self.name}' starting iteration {iteration + 1}/{self.mcp_config.max_tool_calls + 1}")
 
-            # LLM推理
+            # LLM推理（不传入tools）
             response = await self.llm_manager.chat(messages)
             assistant_message = response.content
 
@@ -163,14 +283,15 @@ class MCPAgent(BaseAgent):
                 f"{assistant_message[:200]}..."
             )
 
-            # 检查是否需要调用工具
+            # 检查是否需要调用工具（解析JSON）
             tool_calls = self._parse_tool_calls(assistant_message)
+
+            logger.info(f"Parsed {len(tool_calls)} tool call(s) from LLM response")
 
             if not tool_calls:
                 # 没有工具调用，直接返回响应
                 logger.info(
-                    f"MCP Agent '{self.name}' completed without tool calls "
-                    f"(iteration {iteration + 1})"
+                    f"MCP Agent '{self.name}' got final answer (iteration {iteration + 1}, length: {len(assistant_message)} chars)"
                 )
                 return assistant_message
 

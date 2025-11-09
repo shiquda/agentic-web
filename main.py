@@ -109,8 +109,17 @@ def build_agent_executor(agent_config: AgentConfigModel):
         config_manager = get_config_manager()
         llm_config_model = config_manager.get_llm_provider(agent_config.llm_provider)
 
-        # 转换为LLMConfig并注册LLM管理器
-        llm_config = LLMConfig(**llm_config_model.model_dump())
+        # 转换为LLMConfig（排除嵌套的tool_calling字段）
+        config_dict = llm_config_model.model_dump(exclude={'tool_calling'})
+
+        # 从配置中提取tool_calling相关字段并添加到字典
+        if llm_config_model.tool_calling:
+            config_dict['tool_calling_enabled'] = llm_config_model.tool_calling.enabled
+            config_dict['tool_calling_mode'] = llm_config_model.tool_calling.mode
+            config_dict['tool_choice'] = llm_config_model.tool_calling.tool_choice
+            config_dict['max_tool_iterations'] = llm_config_model.tool_calling.max_iterations
+
+        llm_config = LLMConfig(**config_dict)
         llm_manager = register_llm_manager(agent_config.name, llm_config)
 
         # 获取system prompt
@@ -134,17 +143,17 @@ def build_agent_executor(agent_config: AgentConfigModel):
         config_manager = get_config_manager()
         llm_config_model = config_manager.get_llm_provider(agent_config.llm_provider)
 
-        # 转换为LLMConfig并注册LLM管理器
-        llm_config = LLMConfig(**llm_config_model.model_dump())
+        # 转换为LLMConfig（排除嵌套的tool_calling字段）
+        config_dict = llm_config_model.model_dump(exclude={'tool_calling'})
 
-        # 从配置中提取tool_calling相关字段并设置到llm_config
+        # 从配置中提取tool_calling相关字段并添加到字典
         if llm_config_model.tool_calling:
-            llm_config.tool_calling_enabled = llm_config_model.tool_calling.enabled
-            llm_config.tool_calling_mode = llm_config_model.tool_calling.mode
-            llm_config.tool_choice = llm_config_model.tool_calling.tool_choice
-            llm_config.tools = llm_config_model.tool_calling.tools
-            llm_config.max_tool_iterations = llm_config_model.tool_calling.max_iterations
+            config_dict['tool_calling_enabled'] = llm_config_model.tool_calling.enabled
+            config_dict['tool_calling_mode'] = llm_config_model.tool_calling.mode
+            config_dict['tool_choice'] = llm_config_model.tool_calling.tool_choice
+            config_dict['max_tool_iterations'] = llm_config_model.tool_calling.max_iterations
 
+        llm_config = LLMConfig(**config_dict)
         llm_manager = register_llm_manager(agent_config.name, llm_config)
 
         # 创建工具执行器
@@ -179,9 +188,35 @@ def build_agent_executor(agent_config: AgentConfigModel):
         config_manager = get_config_manager()
         llm_config_model = config_manager.get_llm_provider(agent_config.llm_provider)
 
-        # 转换为LLMConfig并注册LLM管理器（如果还没注册）
+        # 手动构建LLMConfig字典（不使用model_dump以避免嵌套问题）
+        config_dict = {
+            'provider': llm_config_model.provider,
+            'model': llm_config_model.model,
+            'api_key': llm_config_model.api_key,
+            'base_url': llm_config_model.base_url,
+            'api_version': llm_config_model.api_version,
+            'temperature': llm_config_model.temperature,
+            'max_tokens': llm_config_model.max_tokens,
+            'timeout': llm_config_model.timeout,
+            'max_retries': llm_config_model.max_retries,
+            'verify_ssl': llm_config_model.verify_ssl,
+        }
+
+        # 从配置中提取tool_calling相关字段
+        if llm_config_model.tool_calling:
+            config_dict['tool_calling_enabled'] = llm_config_model.tool_calling.enabled
+            config_dict['tool_calling_mode'] = llm_config_model.tool_calling.mode
+            config_dict['tool_choice'] = llm_config_model.tool_calling.tool_choice
+            config_dict['max_tool_iterations'] = llm_config_model.tool_calling.max_iterations
+            logger.info(
+                f"MCP Agent '{agent_config.name}' tool_calling config: "
+                f"enabled={config_dict['tool_calling_enabled']}, "
+                f"mode={config_dict['tool_calling_mode']}, "
+                f"choice={config_dict['tool_choice']}"
+            )
+
         llm_manager_name = f"mcp_{agent_config.name}"
-        llm_config = LLMConfig(**llm_config_model.model_dump())
+        llm_config = LLMConfig(**config_dict)
         llm_manager = register_llm_manager(llm_manager_name, llm_config)
 
         # 解析MCP配置

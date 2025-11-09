@@ -73,10 +73,10 @@ class LLMConfig(BaseModel):
     verify_ssl: bool = Field(default=True)  # SSL证书验证，默认启用
 
     # 工具调用配置（可选）
+    # 注意：只控制调用方式，不定义具体工具。工具由Agent动态提供。
     tool_calling_enabled: bool = Field(default=False)
     tool_calling_mode: str = Field(default="native")  # native 或 prompt
     tool_choice: str | dict = Field(default="auto")
-    tools: list[dict[str, Any]] = Field(default_factory=list)
     max_tool_iterations: int = Field(default=10)
 
     class Config:
@@ -184,6 +184,7 @@ class LLMManager:
     async def chat(
         self,
         messages: list[dict[str, str]],
+        tools: list[dict] | None = None,  # 新增：动态传入工具定义
         **kwargs
     ) -> LLMResponse:
         """
@@ -191,6 +192,7 @@ class LLMManager:
 
         Args:
             messages: 消息列表，格式为 [{"role": "user", "content": "..."}]
+            tools: 工具定义列表（OpenAI格式），如果不提供则不使用工具调用
             **kwargs: 额外参数覆盖配置
 
         Returns:
@@ -209,11 +211,13 @@ class LLMManager:
         if self.config.max_tokens:
             params["max_tokens"] = kwargs.get("max_tokens", self.config.max_tokens)
 
-        # 添加工具调用参数
+        # 添加工具调用参数（只有在 native 模式下）
+        # 注意：工具由调用方动态传入，而不是从配置读取
         if self.config.tool_calling_enabled and self.config.tool_calling_mode == "native":
-            if self.config.tools:
-                params["tools"] = kwargs.get("tools", self.config.tools)
+            if tools:  # 只有传入了工具才添加参数
+                params["tools"] = tools
                 params["tool_choice"] = kwargs.get("tool_choice", self.config.tool_choice)
+                logger.debug(f"Using native tool calling with {len(tools)} tool(s)")
 
         # Log request details
         logger.debug(
